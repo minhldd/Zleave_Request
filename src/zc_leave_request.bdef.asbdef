@@ -1,0 +1,19 @@
+projection;
+strict ( 2 );
+
+/*
+ * ZC_LEAVE_REQUEST – Behavior Definition (Projection / Consumption Layer)
+ * Expose chính xác những gì giao diện Fiori cần.
+ */
+
+define behavior for ZC_LEAVE_REQUEST alias LeaveRequest
+{
+  use create;
+  use update;
+  use delete;
+
+  use action approveResult;
+  use action rejectResult;
+  use action hrApproveResult;
+  use action hrRejectResult;
+}

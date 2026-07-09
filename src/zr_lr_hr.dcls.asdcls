@@ -1,0 +1,5 @@
+@EndUserText.label: 'Access Control for HR auth'
+@MappingRole: true
+define role ZR_LR_HR {
+  grant select on ZI_LEAVE_REQUEST_ADMIN;
+}

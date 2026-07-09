@@ -1,0 +1,12 @@
+@EndUserText.label: 'Leave Management – Service Definition'
+define service ZUI_LEAVE_MGMT {
+  expose ZC_LEAVE_REQUEST as LeaveRequest;
+  expose ZI_LEAVE_REQUEST_ADMIN as LeaveRequestAdmin;
+  expose ZI_EMPLOYEE as Employee;
+  expose ZI_LEAVE_TYPE as LeaveType;
+  expose ZI_LEAVE_QUOTA as LeaveQuota;
+  expose ZC_EMPLOYEE_ADMIN as EmployeeAdmin;
+  expose ZC_LEAVE_QUOTA_ADMIN as QuotaOverview;
+  expose ZC_LEAVE_TYPE_ADMIN as LeaveTypeAdmin;
+  expose ZC_LEAVE_AUDIT_LOG as AuditLog;
+}

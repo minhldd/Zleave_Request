@@ -1,0 +1,6 @@
+@EndUserText.label: 'Access Control for Admin auth'
+@MappingRole: true
+define role ZR_LR_ADMIN {
+  grant select on ZI_LEAVE_REQUEST_ADMIN
+    where ( true );
+}

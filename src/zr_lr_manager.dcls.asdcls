@@ -1,0 +1,7 @@
+@EndUserText.label: 'Access Control for Manager auth'
+@MappingRole: true
+define role ZR_LR_MANAGER {
+  grant select on ZI_LEAVE_REQUEST
+    where ( CreatedBy  = aspect user
+         or ApproverId = aspect user );
+}

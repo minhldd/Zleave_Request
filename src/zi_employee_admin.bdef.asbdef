@@ -1,0 +1,42 @@
+managed implementation in class zbp_i_employee_admin unique;
+strict ( 2 );
+
+define behavior for ZI_EMPLOYEE_ADMIN alias Employee
+  persistent table zemployee_table
+  lock master
+  authorization master ( instance )
+  etag master SapUser
+  early numbering
+{
+  create;
+  update;
+
+  action deactivate result [1] $self;
+  action activate   result [1] $self;
+
+  field ( mandatory : create ) SapUser, FullName;
+  field ( readonly ) EmployeeId, CreatedBy, CreatedAt;
+  field (readonly : update) IsActive;
+
+  determination setAuditFields on save { create; }
+  determination initializeQuota on save { create; }
+
+  validation checkSapUserUnique on save { create; }
+
+  mapping for zemployee_table
+{
+  EmployeeId    = emp_id;
+  SapUser       = sap_user;
+  FullName      = full_name;
+  Email         = email;
+  Department    = department;
+  PositionTitle = position_title;
+  ManagerUser   = manager_user;
+  IsActive      = is_active;
+  IsManager     = is_manager;
+  IsHr          = is_hr;
+  IsAdmin       = is_admin;
+  CreatedBy     = created_by;
+  CreatedAt     = created_at;
+}
+}

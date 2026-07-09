@@ -1,0 +1,61 @@
+managed implementation in class zbp_i_leave_request unique;
+strict ( 2 );
+
+define behavior for ZI_LEAVE_REQUEST alias LeaveRequest
+  lock master
+  authorization master ( instance )
+  etag master LastChangedAt
+  with unmanaged save
+{
+  create;
+  update;
+  delete;
+
+  field ( mandatory : create ) LeaveType, StartDate, EndDate, ApproverId;
+  field ( numbering : managed, readonly ) UUID;
+  field ( readonly )
+    RequestId, EmployeeId, Status, TotalDays,
+    HrApproverId,
+    CreatedBy, CreatedAt, LastChangedBy, LastChangedAt;
+
+  determination determineEmployeeAndManager on modify { create; }
+
+  validation validateDates      on save { create; update; field StartDate, EndDate; }
+  validation validateLeaveQuota on save { create; field TotalDays, LeaveType; }
+  validation validateOverlap    on save { create; field StartDate, EndDate; }
+  validation validateSession    on save { create; field StartSession, EndSession; }
+
+
+  action ( features : instance ) approveResult   result [1] $self;
+  action ( features : instance ) rejectResult    result [1] $self;
+
+
+  action ( features : instance ) hrApproveResult result [1] $self;
+  action ( features : instance ) hrRejectResult  result [1] $self;
+
+  mapping for zleave_request corresponding
+  {
+    UUID            = mykey;
+    RequestId       = request_id;
+    EmployeeId      = employee_id;
+    ApproverId      = approver_id;
+    HrApproverId    = hr_approver_id;
+    LeaveType       = leave_type;
+    StartDate       = start_date;
+    EndDate         = end_date;
+    StartSession    = start_session;
+    EndSession      = end_session;
+    TotalDays       = total_days;
+    Reason          = reason;
+    Status          = status;
+    ApprovalComment = approval_comment;
+    HrComment       = hr_comment;
+    Attachment      = attachment;
+    MimeType        = mime_type;
+    FileName        = file_name;
+    CreatedBy       = created_by;
+    CreatedAt       = created_at;
+    LastChangedBy   = last_changed_by;
+    LastChangedAt   = last_changed_at;
+  }
+}

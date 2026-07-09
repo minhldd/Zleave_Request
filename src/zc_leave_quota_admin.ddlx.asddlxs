@@ -1,0 +1,16 @@
+@Metadata.layer: #CORE
+
+annotate entity ZC_LEAVE_QUOTA_ADMIN with
+{
+  @UI.selectionField: [{ position: 10 }]
+  EmployeeId;
+
+  @UI.selectionField: [{ position: 20 }]
+  LeaveTypeId;
+
+  @UI.selectionField: [{ position: 30 }]
+  QuotaYear;
+
+  @UI.selectionField: [{ position: 40 }]
+  Department;
+}

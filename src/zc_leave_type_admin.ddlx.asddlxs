@@ -1,0 +1,10 @@
+@Metadata.layer: #CORE
+
+annotate entity ZC_LEAVE_TYPE_ADMIN with
+{
+  @UI.selectionField: [{ position: 10 }]
+  LeaveTypeId;
+
+  @UI.selectionField: [{ position: 20 }]
+  IsActive;
+}

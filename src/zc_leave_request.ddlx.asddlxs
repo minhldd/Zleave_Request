@@ -1,0 +1,62 @@
+@Metadata.layer: #CORE
+@UI: {
+  headerInfo: {
+    typeName:       'Leave Request',
+    typeNamePlural: 'Leave Requests',
+    title:       { type: #STANDARD, value: 'RequestId' },
+    description: { type: #STANDARD, value: 'Status'    }
+  }
+}
+
+annotate view ZC_LEAVE_REQUEST with
+{
+  /*----------------------------------------------------------------
+   * Selection Filter trên List Report
+   *----------------------------------------------------------------*/
+  @UI.selectionField: [{ position: 10 }]
+  LeaveType;
+
+  @UI.selectionField: [{ position: 20 }]
+  Status;
+
+  @UI.selectionField: [{ position: 30 }]
+  StartDate;
+
+  /*----------------------------------------------------------------
+   * Object Page Facets:
+   *   - GeneralInfo  : các trường nhân viên nhập khi tạo đơn
+   *   - ApprovalInfo : chỉ hiện sau khi đã có approver xử lý
+   *     -> dùng #IDENTIFICATION_REFERENCE nên chỉ render field
+   *        nào có @UI.identification, không render khi Create
+   *        nếu field là readonly và rỗng
+   *----------------------------------------------------------------*/
+  @UI.facet: [
+    {
+      id:       'GeneralInfo',
+      purpose:  #STANDARD,
+      type:     #IDENTIFICATION_REFERENCE,
+      label:    'General Information',
+      position: 10
+    },
+    {
+      id:              'ApprovalInfo',
+      purpose:         #STANDARD,
+      type:            #FIELDGROUP_REFERENCE,
+      targetQualifier: 'ApprovalGrp',
+      label:           'Approval Details',
+      position:        20
+    }
+  ]
+  RequestId;
+
+  /*----------------------------------------------------------------
+   * Approval Details field group
+   * Hidden khi Create vì ApproverId + ApprovalComment là readonly
+   * và rỗng -> Fiori Elements tự ẩn section trống
+   *----------------------------------------------------------------*/
+  @UI.fieldGroup: [{ qualifier: 'ApprovalGrp', position: 10, label: 'Approver' }]
+  ApproverId;
+
+  @UI.fieldGroup: [{ qualifier: 'ApprovalGrp', position: 20, label: 'Approval Comment' }]
+  ApprovalComment;
+}

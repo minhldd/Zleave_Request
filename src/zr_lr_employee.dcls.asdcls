@@ -1,0 +1,6 @@
+@EndUserText.label: 'Access Control for Employee auth'
+@MappingRole: true
+define role ZR_LR_EMPLOYEE {
+  grant select on ZI_LEAVE_REQUEST
+    where CreatedBy  = aspect user;
+}

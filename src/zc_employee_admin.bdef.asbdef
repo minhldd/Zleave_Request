@@ -1,0 +1,11 @@
+projection;
+strict ( 2 );
+
+define behavior for ZC_EMPLOYEE_ADMIN alias Employee
+{
+  use create;
+  use update;
+
+  use action activate;
+  use action deactivate;
+}
