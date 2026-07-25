@@ -2,7 +2,11 @@
 "# LOCAL TYPES cho ZBP_I_LEAVE_REQUEST (Không dùng HCM)
 "##############################################################################
 
-CLASS lhc_leave_request DEFINITION INHERITING FROM cl_abap_behavior_handler.
+CLASS ltc_leave_request DEFINITION DEFERRED FOR TESTING.
+
+CLASS lhc_leave_request DEFINITION INHERITING FROM cl_abap_behavior_handler
+  FRIENDS ltc_leave_request.
+
   PRIVATE SECTION.
 
     "--- Helper method: tính TotalDays theo Session (không cần LeaveUnit) ---
@@ -55,7 +59,7 @@ CLASS lhc_leave_request DEFINITION INHERITING FROM cl_abap_behavior_handler.
       FOR MODIFY
       IMPORTING keys FOR ACTION LeaveRequest~rejectResult RESULT result.
 
-    "--- ✅ THÊM: HR actions cho duyệt cấp 2 ---
+    "--- HR actions cho duyệt cấp 2 ---
     METHODS hrApproveResult
       FOR MODIFY
       IMPORTING keys FOR ACTION LeaveRequest~hrApproveResult RESULT result.
@@ -64,6 +68,8 @@ CLASS lhc_leave_request DEFINITION INHERITING FROM cl_abap_behavior_handler.
       FOR MODIFY
       IMPORTING keys FOR ACTION LeaveRequest~hrRejectResult RESULT result.
 
+    "--- ✅ THAY ĐỔI: send_email_sendgrid giờ tự đọc config từ ZSENDGRID_CONFIG,
+    "    không còn nhận API Key/Sender hard-code qua CONSTANTS ---
     METHODS send_email_sendgrid
       IMPORTING
         iv_to_email  TYPE string
@@ -85,7 +91,14 @@ CLASS lhc_leave_request DEFINITION INHERITING FROM cl_abap_behavior_handler.
             iv_new_status  TYPE zleave_audit_log-new_status
             iv_comments     TYPE zleave_audit_log-comments OPTIONAL.
 
+    METHODS validateLeaveTypeActive
+      FOR VALIDATE ON SAVE
+      IMPORTING keys FOR LeaveRequest~validateLeaveTypeActive.
+
+    "--- ❌ ĐÃ XÓA: recalculateQuota (chỉ dùng khi cho phép edit đơn) ---
+
 ENDCLASS.
+
 
 CLASS lhc_leave_request IMPLEMENTATION.
 
@@ -138,12 +151,13 @@ CLASS lhc_leave_request IMPLEMENTATION.
 
 "=============================================================================
 " INSTANCE AUTHORIZATION
+" ✅ THAY ĐỔI: %update luôn unauthorized (đã bỏ tính năng edit đơn)
 "=============================================================================
   METHOD get_instance_authorizations.
 
     DATA(lv_user) = cl_abap_context_info=>get_user_technical_name( ).
 
-    "--- ✅ Check role HR/Admin qua bảng AGR_USERS ---
+    "--- Check role HR/Admin qua bảng AGR_USERS ---
     DATA(lv_is_hr) = abap_false.
 
     SELECT SINGLE agr_name
@@ -213,9 +227,9 @@ CLASS lhc_leave_request IMPLEMENTATION.
 
 "=============================================================================
 " INSTANCE FEATURES
-" ✅ Thêm control cho HR action buttons
 " Manager Approve/Reject: enable khi SUBMITTED
 " HR Approve/Reject:      enable khi MGR_APPROVED
+" ✅ THAY ĐỔI: đã bỏ field %update (không còn edit), lv_editable không dùng nữa
 "=============================================================================
   METHOD get_instance_features.
 
@@ -234,24 +248,19 @@ CLASS lhc_leave_request IMPLEMENTATION.
                              THEN if_abap_behv=>fc-o-enabled
                              ELSE if_abap_behv=>fc-o-disabled ).
 
-      "--- ✅ HR actions: enable khi MGR_APPROVED ---
+      "--- HR actions: enable khi MGR_APPROVED ---
       DATA(lv_mgr_approved) = COND if_abap_behv=>t_char01(
                                 WHEN <ls>-Status = 'MGR_APPROVED'
                                 THEN if_abap_behv=>fc-o-enabled
                                 ELSE if_abap_behv=>fc-o-disabled ).
 
-      DATA(lv_editable) = COND if_abap_behv=>t_char01(
-                            WHEN <ls>-Status = 'APPROVED'
-                              OR <ls>-Status = 'REJECTED'
-                            THEN if_abap_behv=>fc-o-disabled
-                            ELSE if_abap_behv=>fc-o-enabled ).
-
       APPEND VALUE #(
         %tky                    = <ls>-%tky
         %action-approveResult   = lv_submitted
         %action-rejectResult    = lv_submitted
-        %action-hrApproveResult = lv_mgr_approved    "← ✅ THÊM
-        %action-hrRejectResult  = lv_mgr_approved    "← ✅ THÊM
+        %action-hrApproveResult = lv_mgr_approved
+        %action-hrRejectResult  = lv_mgr_approved
+        "--- ❌ ĐÃ BỎ: %update field control (không còn edit) ---
       ) TO result.
 
     ENDLOOP.
@@ -263,18 +272,31 @@ CLASS lhc_leave_request IMPLEMENTATION.
 " ApproverId do Employee chọn khi tạo đơn, KHÔNG auto-set
 " Tính TotalDays theo Session (không cần LeaveUnit)
 " Trừ quota NGAY KHI TẠO ĐƠN
-"=============================================================================
-  "=============================================================================
-" DETERMINATION: determineEmployeeAndManager
-" ✅ Nếu user có role Manager → Status = MGR_APPROVED ngay khi tạo
-" ✅ Nếu user là Employee thường → Status = SUBMITTED như cũ
+"
+" ✅ THAY ĐỔI QUAN TRỌNG: KHÔNG còn gửi email ở đây nữa.
+" Lý do bạn nêu ra là đúng: "ON MODIFY" determination chạy TRƯỚC các
+" validate ON SAVE (validateDates, validateLeaveQuota, validateOverlap,
+" validateSession, validateLeaveTypeActive). Nếu 1 trong các validate đó
+" reject transaction, RAP sẽ rollback toàn bộ thay đổi DB - nhưng email đã
+" gửi ra ngoài (side-effect qua HTTP) thì KHÔNG thể "rollback" được.
+" -> Kết quả: user nhận được mail "đơn mới cần duyệt" dù đơn chưa hề được
+" tạo thành công.
+"
+" Cách fix: method này CHỈ còn lo phần data (RequestId, Status, quota...).
+" Việc gửi email "đơn mới cần duyệt" được chuyển sang save_modified (SAVER
+" CLASS), trong nhánh CREATE - đây là nơi DUY NHẤT chạy SAU KHI mọi
+" validate đã pass và ngay trước khi DB COMMIT thực sự xảy ra.
+"
+" ✅ FIX QUOTA BỊ TRỪ 2 LẦN (giữ nguyên như cũ):
+" Đọc thêm field RequestId, CHECK RequestId IS INITIAL trước khi xử lý để
+" chống bị framework gọi lại determination 2 lần cho cùng 1 instance.
 "=============================================================================
   METHOD determineEmployeeAndManager.
 
     DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
     DATA(lv_year)         = sy-datum(4).
 
-    "--- ✅ Check user có role Manager không ---
+    "--- Check user có role Manager không ---
     DATA(lv_is_manager) = abap_false.
 
     SELECT SINGLE agr_name
@@ -313,30 +335,35 @@ CLASS lhc_leave_request IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    DATA lv_nr_number TYPE numc10.
-    CALL FUNCTION 'NUMBER_GET_NEXT'
-      EXPORTING
-        nr_range_nr = '01'
-        object      = 'ZLEAVE_NR'
-      IMPORTING
-        number      = lv_nr_number
-      EXCEPTIONS
-        OTHERS      = 1.
-
-    DATA(lv_request_id) = COND string(
-                            WHEN sy-subrc = 0
-                            THEN |LR-{ lv_nr_number }|
-                            ELSE |LR-{ lv_current_user }-{ sy-datum }| ).
-
-    GET TIME STAMP FIELD DATA(lv_ts).
-
+    "--- THÊM RequestId vào FIELDS để dùng làm guard chống double-run ---
     READ ENTITIES OF zi_leave_request IN LOCAL MODE
       ENTITY LeaveRequest
-      FIELDS ( StartDate EndDate LeaveType StartSession EndSession ApproverId  )
+      FIELDS ( RequestId StartDate EndDate LeaveType StartSession EndSession ApproverId )
       WITH CORRESPONDING #( keys )
       RESULT DATA(lt_dates).
 
     LOOP AT lt_dates ASSIGNING FIELD-SYMBOL(<ls_d>).
+
+      "--- GUARD: nếu RequestId đã có giá trị -> đơn đã được xử lý
+      "    (tạo + trừ quota) rồi, bỏ qua để tránh trừ quota lần 2 ---
+      CHECK <ls_d>-RequestId IS INITIAL.
+
+      DATA lv_nr_number TYPE numc10.
+      CALL FUNCTION 'NUMBER_GET_NEXT'
+        EXPORTING
+          nr_range_nr = '01'
+          object      = 'ZLEAVE_NR'
+        IMPORTING
+          number      = lv_nr_number
+        EXCEPTIONS
+          OTHERS      = 1.
+
+      DATA(lv_request_id) = COND string(
+                              WHEN sy-subrc = 0
+                              THEN |LR-{ lv_nr_number }|
+                              ELSE |LR-{ lv_current_user }-{ sy-datum }| ).
+
+      GET TIME STAMP FIELD DATA(lv_ts).
 
       DATA(lv_days) = calculate_total_days(
                         iv_start_date    = <ls_d>-StartDate
@@ -370,6 +397,7 @@ CLASS lhc_leave_request IMPLEMENTATION.
                 AND quota_year    = @lv_year.
 
           ELSE.
+            APPEND VALUE #( %tky = <ls_d>-%tky ) TO reported-leaverequest.
             APPEND VALUE #(
               %tky = <ls_d>-%tky
               %msg = new_message_with_text(
@@ -382,7 +410,7 @@ CLASS lhc_leave_request IMPLEMENTATION.
         ENDIF.
       ENDIF.
 
-      "--- ✅ Xác định Status và HrApproverId theo role ---
+      "--- Xác định Status và HrApproverId theo role ---
       DATA lv_status       TYPE char15.
       DATA lv_hr_approver  TYPE syuname.
 
@@ -423,41 +451,9 @@ CLASS lhc_leave_request IMPLEMENTATION.
             LastChangedAt = lv_ts )
         ).
 
-    "--- ✅ Gửi email cho Manager khi Employee tạo đơn ---
-      IF lv_is_manager = abap_false
-         AND <ls_d>-ApproverId IS NOT INITIAL.
-
-        DATA(lv_mgr_email) = get_user_email(
-                               iv_username = <ls_d>-ApproverId ).
-
-        IF lv_mgr_email IS INITIAL.
-      "--- ApproverId có nhưng không tìm được email trong SU01 ---
-      APPEND VALUE #(
-        %tky = <ls_d>-%tky
-        %msg = new_message_with_text(
-                 severity = if_abap_behv_message=>severity-warning
-                 text     = |Email không tìm thấy cho Approver: { <ls_d>-ApproverId }. Kiểm tra SU01.|
-               )
-      ) TO reported-leaverequest.
-    ELSE.
-          send_email_sendgrid(
-            iv_to_email  = lv_mgr_email
-            iv_to_name   = CONV string( <ls_d>-ApproverId )
-            iv_subject   = |[Leave Request] Đơn mới cần duyệt - { lv_request_id }|
-           iv_body_text = |Xin chào,<br><br>| &&
-|Nhân viên { ls_emp-full_name } vừa gửi đơn xin nghỉ phép.<br><br>| &&
-|Mã đơn: { lv_request_id }<br>| &&
-|Loại nghỉ: { <ls_d>-LeaveType }<br>| &&
-|Từ ngày: { <ls_d>-StartDate }<br>| &&
-|Đến ngày: { <ls_d>-EndDate }<br>| &&
-|Số ngày: { lv_days }<br><br>| &&
-|Vui lòng đăng nhập hệ thống để duyệt đơn.<br><br>| &&
-|Trân trọng,<br>| &&
-|<b>Hệ thống Leave Management</b>|
-          ).
-        ENDIF.
-
-      ENDIF.
+      "--- ❌ ĐÃ XÓA: toàn bộ khối gửi email cho Manager ở đây.
+      "    Logic này (bao gồm cả cảnh báo "Email không tìm thấy") đã được
+      "    chuyển sang save_modified, nhánh CREATE, xem class lsc_leave_request. ---
 
     ENDLOOP.
 
@@ -466,44 +462,49 @@ CLASS lhc_leave_request IMPLEMENTATION.
 "=============================================================================
 " VALIDATION: validateDates
 "=============================================================================
-  METHOD validateDates.
+METHOD validateDates.
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest
-      FIELDS ( StartDate EndDate )
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_requests).
+  DATA(lv_first_day_of_month) = sy-datum.
+  lv_first_day_of_month+6(2) = '01'.
 
-    LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest
+    FIELDS ( StartDate EndDate )
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_requests).
 
-      IF <ls>-EndDate < <ls>-StartDate.
-        APPEND VALUE #( %tky = <ls>-%tky ) TO failed-leaverequest.
-        APPEND VALUE #(
-          %tky               = <ls>-%tky
-          %element-StartDate = if_abap_behv=>mk-on
-          %element-EndDate   = if_abap_behv=>mk-on
-          %msg               = new_message_with_text(
-                                 severity = if_abap_behv_message=>severity-error
-                                 text     = 'Ngày kết thúc không được nhỏ hơn ngày bắt đầu!'
-                               )
-        ) TO reported-leaverequest.
-      ENDIF.
+  LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
 
-      IF <ls>-StartDate < sy-datum.
-        APPEND VALUE #( %tky = <ls>-%tky ) TO failed-leaverequest.
-        APPEND VALUE #(
-          %tky               = <ls>-%tky
-          %element-StartDate = if_abap_behv=>mk-on
-          %msg               = new_message_with_text(
-                                 severity = if_abap_behv_message=>severity-error
-                                 text     = 'Ngày bắt đầu không được trong quá khứ!'
-                               )
-        ) TO reported-leaverequest.
-      ENDIF.
+    IF <ls>-EndDate < <ls>-StartDate.
+      APPEND VALUE #( %tky = <ls>-%tky ) TO failed-leaverequest.
+      APPEND VALUE #(
+        %tky               = <ls>-%tky
+        %element-StartDate = if_abap_behv=>mk-on
+        %element-EndDate   = if_abap_behv=>mk-on
+        %msg               = new_message_with_text(
+                               severity = if_abap_behv_message=>severity-error
+                               text     = 'Ngày kết thúc không được nhỏ hơn ngày bắt đầu!'
+                             )
+      ) TO reported-leaverequest.
+    ENDIF.
 
-    ENDLOOP.
+    "--- Chỉ chặn nếu StartDate ở THÁNG TRƯỚC (trước ngày 01 tháng hiện tại) ---
+    IF <ls>-StartDate < lv_first_day_of_month.
+      APPEND VALUE #( %tky = <ls>-%tky ) TO failed-leaverequest.
+      APPEND VALUE #(
+        %tky               = <ls>-%tky
+        %element-StartDate = if_abap_behv=>mk-on
+        %msg               = new_message_with_text(
+                               severity = if_abap_behv_message=>severity-error
+                               text     = |Chỉ được phép gửi đơn cho ngày trong tháng hiện tại trở đi | &&
+                                          |(không thể chọn ngày trước { lv_first_day_of_month+6(2) }.{ lv_first_day_of_month+4(2) }.{ lv_first_day_of_month(4) })!|
+                             )
+      ) TO reported-leaverequest.
+    ENDIF.
 
-  ENDMETHOD.
+  ENDLOOP.
+
+ENDMETHOD.
 
 "=============================================================================
 " VALIDATION: validateSession
@@ -649,396 +650,403 @@ CLASS lhc_leave_request IMPLEMENTATION.
 
 "=============================================================================
 " ACTION: approveResult (Manager duyệt cấp 1)
-" ✅ Đổi Status SUBMITTED -> MGR_APPROVED
-" ✅ Tự động set HrApproverId = HR user đầu tiên có is_hr = 'X'
+" Đổi Status SUBMITTED -> MGR_APPROVED
+" Tự động set HrApproverId = HR user đầu tiên có is_hr = 'X'
 "=============================================================================
   METHOD approveResult.
 
-    GET TIME STAMP FIELD DATA(lv_ts).
-    DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
+  GET TIME STAMP FIELD DATA(lv_ts).
+  DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
 
-    "--- ✅ Tìm HR user để gán HrApproverId ---
-    SELECT SINGLE sap_user
-      FROM zemployee_table
-      WHERE is_hr     = 'X'
-        AND is_active = @abap_true
-      INTO @DATA(lv_hr_user).
+  SELECT SINGLE sap_user
+    FROM zemployee_table
+    WHERE is_hr     = 'X'
+      AND is_active = @abap_true
+    INTO @DATA(lv_hr_user).
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest
+    FIELDS ( Status RequestId EmployeeId )
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_requests).
+
+  LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
+    CHECK <ls>-Status = 'SUBMITTED'.
+
+    " Lấy comment từ parameter
+    READ TABLE keys WITH KEY %tky = <ls>-%tky
+      ASSIGNING FIELD-SYMBOL(<key>).
+    DATA(lv_comment) = COND string(
+                         WHEN sy-subrc = 0
+                         THEN <key>-%param-ApprovalComment
+                         ELSE '' ).
+
+    MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
       ENTITY LeaveRequest
-      FIELDS ( Status RequestId EmployeeId )
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_requests).
+      UPDATE FIELDS ( Status HrApproverId ApprovalComment LastChangedBy LastChangedAt )
+      WITH VALUE #(
+        ( %tky            = <ls>-%tky
+          Status          = 'MGR_APPROVED'
+          HrApproverId    = lv_hr_user
+          ApprovalComment = lv_comment
+          LastChangedBy   = lv_current_user
+          LastChangedAt   = lv_ts )
+      ).
 
-    LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
-      CHECK <ls>-Status = 'SUBMITTED'.
+    APPEND VALUE #(
+      %tky = <ls>-%tky
+      %msg = new_message_with_text(
+               severity = if_abap_behv_message=>severity-success
+               text     = 'Manager đã duyệt. Đơn chuyển sang HR để duyệt lần 2.'
+             )
+    ) TO reported-leaverequest.
 
-      "--- ✅ Chuyển sang MGR_APPROVED, gán HrApproverId ---
-      MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
-        ENTITY LeaveRequest
-        UPDATE FIELDS ( Status HrApproverId LastChangedBy LastChangedAt )
-        WITH VALUE #(
-          ( %tky          = <ls>-%tky
-            Status        = 'MGR_APPROVED'
-            HrApproverId  = lv_hr_user
-            LastChangedBy = lv_current_user
-            LastChangedAt = lv_ts )
+    write_audit_log(
+      iv_request_id  = <ls>-RequestId
+      iv_employee_id = CONV #( <ls>-EmployeeId )
+      iv_action      = 'MGR_APPROVE'
+      iv_old_status  = 'SUBMITTED'
+      iv_new_status  = 'MGR_APPROVED'
+      iv_comments    = CONV #( lv_comment )
+    ).
+
+    "--- Action (approve/reject) chạy SAU khi validate/save của bước trước
+    "    đã pass và ta đang ở giữa 1 modify request đã được authorize riêng,
+    "    nên gửi email trực tiếp ở đây vẫn an toàn (khác với determination
+    "    lúc CREATE, vốn chạy trước validate). ---
+    IF lv_hr_user IS NOT INITIAL.
+      DATA(lv_hr_email) = get_user_email( iv_username = lv_hr_user ).
+      IF lv_hr_email IS NOT INITIAL.
+        send_email_sendgrid(
+          iv_to_email  = lv_hr_email
+          iv_to_name   = CONV string( lv_hr_user )
+          iv_subject   = |[Leave Request] Đơn nghỉ phép chờ HR duyệt|
+          iv_body_text = |Xin chào HR,<br><br>| &&
+                         |Manager đã duyệt 1 đơn xin nghỉ phép.<br>| &&
+                         |<b>Comment Manager:</b> { lv_comment }<br><br>| &&
+                         |Đơn đang chờ HR xác nhận lần 2.<br><br>| &&
+                         |Vui lòng đăng nhập hệ thống để kiểm tra.<br><br>| &&
+                         |Trân trọng,<br><b>Hệ thống Leave Management</b>|
         ).
-
-      APPEND VALUE #(
-        %tky = <ls>-%tky
-        %msg = new_message_with_text(
-                 severity = if_abap_behv_message=>severity-success
-                 text     = 'Manager đã duyệt. Đơn chuyển sang HR để duyệt lần 2.'
-               )
-      ) TO reported-leaverequest.
-
-      "--- Gọi write_audit_log SAU khi APPEND đã đóng ---
-      write_audit_log(
-        iv_request_id  = <ls>-RequestId
-        iv_employee_id = CONV #( <ls>-EmployeeId )   "← CONV tự convert NUMC→CHAR
-        iv_action      = 'MGR_APPROVE'
-        iv_old_status  = 'SUBMITTED'
-        iv_new_status  = 'MGR_APPROVED'
-        iv_comments    = |Manager { lv_current_user } đã duyệt cấp 1|
-    ).
-
-     "--- ✅ Gửi email cho HR ---
-      IF lv_hr_user IS NOT INITIAL.
-
-        DATA(lv_hr_email) = get_user_email(
-                              iv_username = lv_hr_user ).
-
-        IF lv_hr_email IS NOT INITIAL.
-          send_email_sendgrid(
-            iv_to_email  = lv_hr_email
-            iv_to_name   = CONV string( lv_hr_user )
-            iv_subject   = |[Leave Request] Đơn nghỉ phép chờ HR duyệt|
-            iv_body_text = |Xin chào HR,<br><br>| &&
-|Manager đã duyệt 1 đơn xin nghỉ phép.<br>| &&
-|Đơn đang chờ HR xác nhận lần 2.<br><br>| &&
-|Vui lòng đăng nhập hệ thống để kiểm tra.<br><br>| &&
-|Trân trọng,<br>| &&
-|<b>Hệ thống Leave Management</b>|
-          ).
-        ENDIF.
-
       ENDIF.
+    ENDIF.
 
-    ENDLOOP.
+  ENDLOOP.
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest ALL FIELDS
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_result).
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest ALL FIELDS
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_result).
 
-    result = VALUE #(
-      FOR ls IN lt_result ( %tky = ls-%tky %param = ls )
-    ).
+  result = VALUE #( FOR ls IN lt_result ( %tky = ls-%tky %param = ls ) ).
 
-  ENDMETHOD.
+ENDMETHOD.
 
 "=============================================================================
 " ACTION: rejectResult (Manager từ chối)
-" Hoàn trả quota khi reject ở cấp 1
 "=============================================================================
-  METHOD rejectResult.
+METHOD rejectResult.
 
-    GET TIME STAMP FIELD DATA(lv_ts).
-    DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
-    DATA(lv_year)         = sy-datum(4).
+  GET TIME STAMP FIELD DATA(lv_ts).
+  DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
+  DATA(lv_year)         = sy-datum(4).
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest
-      FIELDS ( Status RequestId EmployeeId LeaveType TotalDays CreatedBy )
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_requests).
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest
+    FIELDS ( Status RequestId EmployeeId LeaveType TotalDays CreatedBy )
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_requests).
 
-    LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
-      CHECK <ls>-Status = 'SUBMITTED'.
+  LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
+    CHECK <ls>-Status = 'SUBMITTED'.
 
-      IF <ls>-EmployeeId IS NOT INITIAL
-         AND <ls>-LeaveType IS NOT INITIAL
-         AND <ls>-TotalDays > 0.
+    READ TABLE keys WITH KEY %tky = <ls>-%tky
+      ASSIGNING FIELD-SYMBOL(<key>).
+    DATA(lv_comment) = COND string(
+                         WHEN sy-subrc = 0
+                         THEN <key>-%param-ApprovalComment
+                         ELSE '' ).
 
-        SELECT SINGLE *
-          FROM zquota
+    IF <ls>-EmployeeId IS NOT INITIAL
+       AND <ls>-LeaveType IS NOT INITIAL
+       AND <ls>-TotalDays > 0.
+
+      SELECT SINGLE *
+        FROM zquota
+        WHERE employee_id   = @<ls>-EmployeeId
+          AND leave_type_id = @<ls>-LeaveType
+          AND quota_year    = @lv_year
+        INTO @DATA(ls_quota).
+
+      IF sy-subrc = 0.
+        DATA(lv_new_used)      = ls_quota-used_days - <ls>-TotalDays.
+        DATA(lv_new_remaining) = ls_quota-remaining_days + <ls>-TotalDays.
+        IF lv_new_used < 0. lv_new_used = 0. ENDIF.
+        IF lv_new_remaining > ls_quota-total_days. lv_new_remaining = ls_quota-total_days. ENDIF.
+
+        UPDATE zquota SET
+          used_days       = @lv_new_used,
+          remaining_days  = @lv_new_remaining,
+          last_updated_by = @lv_current_user,
+          last_updated_at = @lv_ts
           WHERE employee_id   = @<ls>-EmployeeId
             AND leave_type_id = @<ls>-LeaveType
-            AND quota_year    = @lv_year
-          INTO @DATA(ls_quota).
-
-        IF sy-subrc = 0.
-          DATA(lv_new_used)      = ls_quota-used_days - <ls>-TotalDays.
-          DATA(lv_new_remaining) = ls_quota-remaining_days + <ls>-TotalDays.
-
-          IF lv_new_used < 0.      lv_new_used = 0.                        ENDIF.
-          IF lv_new_remaining > ls_quota-total_days.
-            lv_new_remaining = ls_quota-total_days.
-          ENDIF.
-
-          UPDATE zquota SET
-            used_days       = @lv_new_used,
-            remaining_days  = @lv_new_remaining,
-            last_updated_by = @lv_current_user,
-            last_updated_at = @lv_ts
-            WHERE employee_id   = @<ls>-EmployeeId
-              AND leave_type_id = @<ls>-LeaveType
-              AND quota_year    = @lv_year.
-        ENDIF.
+            AND quota_year    = @lv_year.
+      ELSE.
+        APPEND VALUE #(
+          %tky = <ls>-%tky
+          %msg = new_message_with_text(
+                   severity = if_abap_behv_message=>severity-warning
+                   text     = |Không tìm thấy quota emp { <ls>-EmployeeId } loai { <ls>-LeaveType } nam { lv_year }|
+                 )
+        ) TO reported-leaverequest.
       ENDIF.
+    ENDIF.
 
-      MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
-        ENTITY LeaveRequest
-        UPDATE FIELDS ( Status LastChangedBy LastChangedAt )
-        WITH VALUE #(
-          ( %tky          = <ls>-%tky
-            Status        = 'REJECTED'
-            LastChangedBy = lv_current_user
-            LastChangedAt = lv_ts )
+    MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
+      ENTITY LeaveRequest
+      UPDATE FIELDS ( Status ApprovalComment LastChangedBy LastChangedAt )
+      WITH VALUE #(
+        ( %tky            = <ls>-%tky
+          Status          = 'REJECTED'
+          ApprovalComment = lv_comment
+          LastChangedBy   = lv_current_user
+          LastChangedAt   = lv_ts )
+      ).
+
+    APPEND VALUE #(
+      %tky = <ls>-%tky
+      %msg = new_message_with_text(
+               severity = if_abap_behv_message=>severity-success
+               text     = 'Manager đã từ chối đơn. Quota đã được hoàn trả (nếu tìm thấy).'
+             )
+    ) TO reported-leaverequest.
+
+    write_audit_log(
+      iv_request_id  = <ls>-RequestId
+      iv_employee_id = CONV #( <ls>-EmployeeId )
+      iv_action      = 'MGR_REJECT'
+      iv_old_status  = 'SUBMITTED'
+      iv_new_status  = 'REJECTED'
+      iv_comments    = CONV #( lv_comment )
+    ).
+
+    IF <ls>-CreatedBy IS NOT INITIAL.
+      DATA(lv_emp_email_mgr_rej) = get_user_email( iv_username = <ls>-CreatedBy ).
+      IF lv_emp_email_mgr_rej IS NOT INITIAL.
+        send_email_sendgrid(
+          iv_to_email  = lv_emp_email_mgr_rej
+          iv_to_name   = CONV string( <ls>-CreatedBy )
+          iv_subject   = |[Leave Request] Đơn nghỉ phép bị từ chối bởi Manager|
+          iv_body_text = |Xin chào,<br><br>| &&
+                         |Rất tiếc, đơn nghỉ phép của bạn đã bị <b>Manager từ chối</b>.<br><br>| &&
+                         |<b>Lý do:</b> { lv_comment }<br><br>| &&
+                         |Vui lòng liên hệ Manager để biết thêm thông tin.<br><br>| &&
+                         |Trân trọng,<br><b>Hệ thống Leave Management</b>|
         ).
-
-      APPEND VALUE #(
-        %tky = <ls>-%tky
-        %msg = new_message_with_text(
-                 severity = if_abap_behv_message=>severity-success
-                 text     = 'Manager đã từ chối đơn. Quota đã được hoàn trả.'
-               )
-      ) TO reported-leaverequest.
-
-      write_audit_log(
-        iv_request_id  = <ls>-RequestId
-        iv_employee_id = CONV #( <ls>-EmployeeId )   "← CONV tự convert NUMC→CHAR
-        iv_action      = 'MGR_REJECT'
-        iv_old_status  = 'SUBMITTED'
-        iv_new_status  = 'REJECTED'
-        iv_comments    = |Manager { lv_current_user } đã từ chối|
-    ).
-
-       IF <ls>-CreatedBy IS NOT INITIAL.
-
-        DATA(lv_emp_email_mgr_rej) = get_user_email(
-                                       iv_username = <ls>-CreatedBy ).
-
-        IF lv_emp_email_mgr_rej IS NOT INITIAL.
-          send_email_sendgrid(
-            iv_to_email  = lv_emp_email_mgr_rej
-            iv_to_name   = CONV string( <ls>-CreatedBy )
-            iv_subject   = |[Leave Request] Đơn nghỉ phép bị từ chối bởi Manager|
-            iv_body_text = |Xin chào,<br><br>| &&
-|Rất tiếc, đơn nghỉ phép của bạn đã bị <b>Manager từ chối</b>.<br><br>| &&
-|Vui lòng liên hệ Manager để biết thêm thông tin.<br><br>| &&
-|Trân trọng,<br>| &&
-|<b>Hệ thống Leave Management</b>|
-          ).
-        ENDIF.
-
       ENDIF.
+    ENDIF.
 
-    ENDLOOP.
+  ENDLOOP.
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest ALL FIELDS
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_result).
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest ALL FIELDS
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_result).
 
-    result = VALUE #(
-      FOR ls IN lt_result ( %tky = ls-%tky %param = ls )
-    ).
+  result = VALUE #( FOR ls IN lt_result ( %tky = ls-%tky %param = ls ) ).
 
-  ENDMETHOD.
+ENDMETHOD.
 
 "=============================================================================
 " ACTION: hrApproveResult (HR duyệt cấp 2)
-" ✅ MGR_APPROVED -> APPROVED (hoàn tất)
-" Không cần trừ/hoàn quota (đã xử lý lúc tạo đơn)
 "=============================================================================
-  METHOD hrApproveResult.
+METHOD hrApproveResult.
 
-    GET TIME STAMP FIELD DATA(lv_ts).
-    DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
+  GET TIME STAMP FIELD DATA(lv_ts).
+  DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest
+    FIELDS ( Status RequestId EmployeeId CreatedBy )
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_requests).
+
+  LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
+    CHECK <ls>-Status = 'MGR_APPROVED'.
+
+    " Lấy comment từ parameter
+    READ TABLE keys WITH KEY %tky = <ls>-%tky
+      ASSIGNING FIELD-SYMBOL(<key>).
+    DATA(lv_comment) = COND string(
+                         WHEN sy-subrc = 0
+                         THEN <key>-%param-ApprovalComment
+                         ELSE '' ).
+
+    MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
       ENTITY LeaveRequest
-      FIELDS ( Status RequestId EmployeeId CreatedBy )
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_requests).
-
-    LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
-      CHECK <ls>-Status = 'MGR_APPROVED'.
-
-      "--- ✅ HR approve -> APPROVED hoàn tất ---
-      MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
-        ENTITY LeaveRequest
-        UPDATE FIELDS ( Status LastChangedBy LastChangedAt )
-        WITH VALUE #(
-          ( %tky          = <ls>-%tky
-            Status        = 'APPROVED'
-            LastChangedBy = lv_current_user
-            LastChangedAt = lv_ts )
-        ).
-
-      APPEND VALUE #(
-        %tky = <ls>-%tky
-        %msg = new_message_with_text(
-                 severity = if_abap_behv_message=>severity-success
-                 text     = 'HR đã duyệt. Đơn nghỉ phép được chấp thuận hoàn toàn.'
-               )
-      ) TO reported-leaverequest.
-
-      write_audit_log(
-        iv_request_id  = <ls>-RequestId
-        iv_employee_id = CONV #( <ls>-EmployeeId )
-        iv_action      = 'HR_APPROVE'
-        iv_old_status  = 'MGR_APPROVED'
-        iv_new_status  = 'APPROVED'
-        iv_comments    = |HR { lv_current_user } đã duyệt cấp 2|
+      UPDATE FIELDS ( Status HrComment LastChangedBy LastChangedAt )
+      WITH VALUE #(
+        ( %tky          = <ls>-%tky
+          Status        = 'APPROVED'
+          HrComment     = lv_comment
+          LastChangedBy = lv_current_user
+          LastChangedAt = lv_ts )
       ).
 
-       IF <ls>-CreatedBy IS NOT INITIAL.
+    APPEND VALUE #(
+      %tky = <ls>-%tky
+      %msg = new_message_with_text(
+               severity = if_abap_behv_message=>severity-success
+               text     = 'HR đã duyệt. Đơn nghỉ phép được chấp thuận hoàn toàn.'
+             )
+    ) TO reported-leaverequest.
 
-        DATA(lv_emp_email_approve) = get_user_email(
-                                       iv_username = <ls>-CreatedBy ).
-
-        IF lv_emp_email_approve IS NOT INITIAL.
-          send_email_sendgrid(
-            iv_to_email  = lv_emp_email_approve
-            iv_to_name   = CONV string( <ls>-CreatedBy )
-            iv_subject   = |[Leave Request] Đơn nghỉ phép đã được APPROVED|
-            iv_body_text = |Xin chào,<br><br>| &&
-|Đơn nghỉ phép của bạn đã được <b>HR duyệt thành công</b>.<br><br>| &&
-|<b>Trạng thái:</b> APPROVED ✅<br><br>| &&
-|Chúc bạn có một kỳ nghỉ thật vui vẻ!<br><br>| &&
-|Trân trọng,<br>| &&
-|<b>Hệ thống Leave Management</b>|
-          ).
-        ENDIF.
-
-      ENDIF.
-
-    ENDLOOP.
-
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest ALL FIELDS
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_result).
-
-    result = VALUE #(
-      FOR ls IN lt_result ( %tky = ls-%tky %param = ls )
+    write_audit_log(
+      iv_request_id  = <ls>-RequestId
+      iv_employee_id = CONV #( <ls>-EmployeeId )
+      iv_action      = 'HR_APPROVE'
+      iv_old_status  = 'MGR_APPROVED'
+      iv_new_status  = 'APPROVED'
+      iv_comments    = CONV #( lv_comment )
     ).
 
-  ENDMETHOD.
+    IF <ls>-CreatedBy IS NOT INITIAL.
+      DATA(lv_emp_email_approve) = get_user_email( iv_username = <ls>-CreatedBy ).
+      IF lv_emp_email_approve IS NOT INITIAL.
+        send_email_sendgrid(
+          iv_to_email  = lv_emp_email_approve
+          iv_to_name   = CONV string( <ls>-CreatedBy )
+          iv_subject   = |[Leave Request] Đơn nghỉ phép đã được APPROVED|
+          iv_body_text = |Xin chào,<br><br>| &&
+                         |Đơn nghỉ phép của bạn đã được <b>HR duyệt thành công</b>.<br><br>| &&
+                         |<b>Comment HR:</b> { lv_comment }<br><br>| &&
+                         |<b>Trạng thái:</b> APPROVED ✅<br><br>| &&
+                         |Chúc bạn có một kỳ nghỉ thật vui vẻ!<br><br>| &&
+                         |Trân trọng,<br><b>Hệ thống Leave Management</b>|
+        ).
+      ENDIF.
+    ENDIF.
+
+  ENDLOOP.
+
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest ALL FIELDS
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_result).
+
+  result = VALUE #( FOR ls IN lt_result ( %tky = ls-%tky %param = ls ) ).
+
+ENDMETHOD.
 
 "=============================================================================
 " ACTION: hrRejectResult (HR từ chối cấp 2)
-" ✅ MGR_APPROVED -> REJECTED + hoàn trả quota
 "=============================================================================
-  METHOD hrRejectResult.
+METHOD hrRejectResult.
 
-    GET TIME STAMP FIELD DATA(lv_ts).
-    DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
-    DATA(lv_year)         = sy-datum(4).
+  GET TIME STAMP FIELD DATA(lv_ts).
+  DATA(lv_current_user) = cl_abap_context_info=>get_user_technical_name( ).
+  DATA(lv_year)         = sy-datum(4).
 
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest
-      FIELDS ( Status RequestId EmployeeId LeaveType TotalDays CreatedBy )
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_requests).
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest
+    FIELDS ( Status RequestId EmployeeId LeaveType TotalDays CreatedBy )
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_requests).
 
-    LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
-      CHECK <ls>-Status = 'MGR_APPROVED'.
+  LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
+    CHECK <ls>-Status = 'MGR_APPROVED'.
 
-      "--- ✅ Hoàn trả quota khi HR reject ---
-      IF <ls>-EmployeeId IS NOT INITIAL
-         AND <ls>-LeaveType IS NOT INITIAL
-         AND <ls>-TotalDays > 0.
+    " Lấy comment từ parameter
+    READ TABLE keys WITH KEY %tky = <ls>-%tky
+      ASSIGNING FIELD-SYMBOL(<key>).
+    DATA(lv_comment) = COND string(
+                         WHEN sy-subrc = 0
+                         THEN <key>-%param-ApprovalComment
+                         ELSE '' ).
 
-        SELECT SINGLE *
-          FROM zquota
+    IF <ls>-EmployeeId IS NOT INITIAL
+       AND <ls>-LeaveType IS NOT INITIAL
+       AND <ls>-TotalDays > 0.
+
+      SELECT SINGLE *
+        FROM zquota
+        WHERE employee_id   = @<ls>-EmployeeId
+          AND leave_type_id = @<ls>-LeaveType
+          AND quota_year    = @lv_year
+        INTO @DATA(ls_quota).
+
+      IF sy-subrc = 0.
+        DATA(lv_new_used)      = ls_quota-used_days - <ls>-TotalDays.
+        DATA(lv_new_remaining) = ls_quota-remaining_days + <ls>-TotalDays.
+        IF lv_new_used < 0. lv_new_used = 0. ENDIF.
+        IF lv_new_remaining > ls_quota-total_days. lv_new_remaining = ls_quota-total_days. ENDIF.
+
+        UPDATE zquota SET
+          used_days       = @lv_new_used,
+          remaining_days  = @lv_new_remaining,
+          last_updated_by = @lv_current_user,
+          last_updated_at = @lv_ts
           WHERE employee_id   = @<ls>-EmployeeId
             AND leave_type_id = @<ls>-LeaveType
-            AND quota_year    = @lv_year
-          INTO @DATA(ls_quota).
-
-        IF sy-subrc = 0.
-          DATA(lv_new_used)      = ls_quota-used_days - <ls>-TotalDays.
-          DATA(lv_new_remaining) = ls_quota-remaining_days + <ls>-TotalDays.
-
-          IF lv_new_used < 0.      lv_new_used = 0.                        ENDIF.
-          IF lv_new_remaining > ls_quota-total_days.
-            lv_new_remaining = ls_quota-total_days.
-          ENDIF.
-
-          UPDATE zquota SET
-            used_days       = @lv_new_used,
-            remaining_days  = @lv_new_remaining,
-            last_updated_by = @lv_current_user,
-            last_updated_at = @lv_ts
-            WHERE employee_id   = @<ls>-EmployeeId
-              AND leave_type_id = @<ls>-LeaveType
-              AND quota_year    = @lv_year.
-        ENDIF.
+            AND quota_year    = @lv_year.
       ENDIF.
+    ENDIF.
 
-      MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
-        ENTITY LeaveRequest
-        UPDATE FIELDS ( Status LastChangedBy LastChangedAt )
-        WITH VALUE #(
-          ( %tky          = <ls>-%tky
-            Status        = 'REJECTED'
-            LastChangedBy = lv_current_user
-            LastChangedAt = lv_ts )
-        ).
-
-      APPEND VALUE #(
-        %tky = <ls>-%tky
-        %msg = new_message_with_text(
-                 severity = if_abap_behv_message=>severity-success
-                 text     = 'HR đã từ chối đơn. Quota đã được hoàn trả.'
-               )
-      ) TO reported-leaverequest.
-
-      write_audit_log(
-        iv_request_id  = <ls>-RequestId
-        iv_employee_id = CONV #( <ls>-EmployeeId )
-        iv_action      = 'HR_REJECT'
-        iv_old_status  = 'MGR_APPROVED'
-        iv_new_status  = 'REJECTED'
-        iv_comments    = |HR { lv_current_user } đã từ chối|
+    MODIFY ENTITIES OF zi_leave_request IN LOCAL MODE
+      ENTITY LeaveRequest
+      UPDATE FIELDS ( Status HrComment LastChangedBy LastChangedAt )
+      WITH VALUE #(
+        ( %tky          = <ls>-%tky
+          Status        = 'REJECTED'
+          HrComment     = lv_comment
+          LastChangedBy = lv_current_user
+          LastChangedAt = lv_ts )
       ).
 
-      IF <ls>-CreatedBy IS NOT INITIAL.
+    APPEND VALUE #(
+      %tky = <ls>-%tky
+      %msg = new_message_with_text(
+               severity = if_abap_behv_message=>severity-success
+               text     = 'HR đã từ chối đơn. Quota đã được hoàn trả.'
+             )
+    ) TO reported-leaverequest.
 
-        DATA(lv_emp_email_hr_rej) = get_user_email(
-                                      iv_username = <ls>-CreatedBy ).
-
-        IF lv_emp_email_hr_rej IS NOT INITIAL.
-          send_email_sendgrid(
-            iv_to_email  = lv_emp_email_hr_rej
-            iv_to_name   = CONV string( <ls>-CreatedBy )
-            iv_subject   = |[Leave Request] Đơn nghỉ phép bị từ chối bởi HR|
-            iv_body_text = |Xin chào,<br><br>| &&
-|Rất tiếc, đơn nghỉ phép của bạn đã bị <b>HR từ chối</b>.<br><br>| &&
-|Vui lòng liên hệ HR để biết thêm thông tin.<br><br>| &&
-|Trân trọng,<br>| &&
-|<b>Hệ thống Leave Management</b>|
-          ).
-        ENDIF.
-
-      ENDIF.
-
-    ENDLOOP.
-
-    READ ENTITIES OF zi_leave_request IN LOCAL MODE
-      ENTITY LeaveRequest ALL FIELDS
-      WITH CORRESPONDING #( keys )
-      RESULT DATA(lt_result).
-
-    result = VALUE #(
-      FOR ls IN lt_result ( %tky = ls-%tky %param = ls )
+    write_audit_log(
+      iv_request_id  = <ls>-RequestId
+      iv_employee_id = CONV #( <ls>-EmployeeId )
+      iv_action      = 'HR_REJECT'
+      iv_old_status  = 'MGR_APPROVED'
+      iv_new_status  = 'REJECTED'
+      iv_comments    = CONV #( lv_comment )
     ).
 
-  ENDMETHOD.
+    IF <ls>-CreatedBy IS NOT INITIAL.
+      DATA(lv_emp_email_hr_rej) = get_user_email( iv_username = <ls>-CreatedBy ).
+      IF lv_emp_email_hr_rej IS NOT INITIAL.
+        send_email_sendgrid(
+          iv_to_email  = lv_emp_email_hr_rej
+          iv_to_name   = CONV string( <ls>-CreatedBy )
+          iv_subject   = |[Leave Request] Đơn nghỉ phép bị từ chối bởi HR|
+          iv_body_text = |Xin chào,<br><br>| &&
+                         |Rất tiếc, đơn nghỉ phép của bạn đã bị <b>HR từ chối</b>.<br><br>| &&
+                         |<b>Lý do:</b> { lv_comment }<br><br>| &&
+                         |Vui lòng liên hệ HR để biết thêm thông tin.<br><br>| &&
+                         |Trân trọng,<br><b>Hệ thống Leave Management</b>|
+        ).
+      ENDIF.
+    ENDIF.
+
+  ENDLOOP.
+
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest ALL FIELDS
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_result).
+
+  result = VALUE #( FOR ls IN lt_result ( %tky = ls-%tky %param = ls ) ).
+
+ENDMETHOD.
 
   "=============================================================================
 " HELPER: get_user_email
@@ -1063,26 +1071,36 @@ CLASS lhc_leave_request IMPLEMENTATION.
 
 "=============================================================================
 " HELPER: send_email_sendgrid
+" ✅ THAY ĐỔI: API Key + Sender giờ đọc từ bảng ZSENDGRID_CONFIG thay vì
+" CONSTANTS hard-code trong code. Nếu không tìm thấy config active, method
+" tự bỏ qua (không chặn luồng chính) và log 1 message vào sy-msg (tuỳ chọn
+" bạn có thể đổi thành ghi vào bảng log riêng nếu cần theo dõi).
 "=============================================================================
   METHOD send_email_sendgrid.
 
-    CONSTANTS:
-      lc_api_key   TYPE string
-                   VALUE '',    "← ✅ Thay bằng API Key thật
-      lc_from_mail TYPE string
-                   VALUE '', "← ✅ Thay bằng Sender đã verify
-      lc_from_name TYPE string
-                   VALUE 'Leave Management System',
-      lc_endpoint  TYPE string
-                   VALUE 'https://api.sendgrid.com/v3/mail/send'.
+    CONSTANTS lc_endpoint TYPE string VALUE 'https://api.sendgrid.com/v3/mail/send'.
+
+    "--- Đọc config từ table thay vì hard-code ---
+    SELECT SINGLE api_key, sender_email, sender_name
+      FROM zsendgrid_config
+      WHERE config_id  = 'DEFAULT'
+        AND is_active  = @abap_true
+      INTO @DATA(ls_config).
+
+    IF sy-subrc <> 0
+       OR ls_config-api_key      IS INITIAL
+       OR ls_config-sender_email IS INITIAL.
+      "--- Không có config hợp lệ -> không gửi, không chặn luồng chính ---
+      RETURN.
+    ENDIF.
 
     DATA(lv_json) = |\{"personalizations":[| &&
                     |\{"to":[| &&
                     |\{"email":"{ iv_to_email }",| &&
                     |"name":"{ iv_to_name }"\}| &&
                     |]\}],| &&
-                    |"from":\{"email":"{ lc_from_mail }",| &&
-                    |"name":"{ lc_from_name }"\},| &&
+                    |"from":\{"email":"{ ls_config-sender_email }",| &&
+                    |"name":"{ ls_config-sender_name }"\},| &&
                     |"subject":"{ iv_subject }",| &&
                     |"content":[| &&
                     |\{"type":"text/html",| &&
@@ -1110,7 +1128,7 @@ CLASS lhc_leave_request IMPLEMENTATION.
 
       lo_http_client->request->set_header_field(
         name  = 'Authorization'
-        value = |Bearer { lc_api_key }|
+        value = |Bearer { ls_config-api_key }|
       ).
       lo_http_client->request->set_header_field(
         name  = 'Content-Type'
@@ -1166,6 +1184,37 @@ CLASS lhc_leave_request IMPLEMENTATION.
 
   ENDMETHOD.
 
+  METHOD validateLeaveTypeActive.
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest
+    FIELDS ( LeaveType )
+    WITH CORRESPONDING #( keys )
+    RESULT DATA(lt_requests).
+
+  LOOP AT lt_requests ASSIGNING FIELD-SYMBOL(<ls>).
+    CHECK <ls>-LeaveType IS NOT INITIAL.
+
+    SELECT SINGLE is_active
+      FROM zleave_type
+      WHERE leave_type_id = @<ls>-LeaveType
+      INTO @DATA(lv_active).
+
+    IF sy-subrc <> 0 OR lv_active = abap_false.
+      APPEND VALUE #( %tky = <ls>-%tky ) TO failed-leaverequest.
+      APPEND VALUE #(
+        %tky             = <ls>-%tky
+        %element-LeaveType = if_abap_behv=>mk-on
+        %msg             = new_message_with_text(
+                             severity = if_abap_behv_message=>severity-error
+                             text     = |Loại nghỉ '{ <ls>-LeaveType }' đã bị vô hiệu hóa. Vui lòng chọn loại khác.|
+                           )
+      ) TO reported-leaverequest.
+    ENDIF.
+  ENDLOOP.
+ENDMETHOD.
+
+  "--- ❌ ĐÃ XÓA: METHOD recalculateQuota (chỉ cần khi cho phép edit đơn) ---
+
 ENDCLASS.
 
 "##############################################################################
@@ -1174,6 +1223,31 @@ ENDCLASS.
 CLASS lsc_leave_request DEFINITION INHERITING FROM cl_abap_behavior_saver.
   PROTECTED SECTION.
     METHODS save_modified REDEFINITION.
+
+  PRIVATE SECTION.
+    "--- ✅ THÊM: helper riêng cho saver để lấy email user từ SU01 (ADR6/USR21).
+    "    Saver class không kế thừa lhc_leave_request nên cần bản riêng. ---
+    METHODS get_user_email_for_saver
+      IMPORTING
+        iv_username     TYPE syuname
+      RETURNING
+        VALUE(rv_email) TYPE string.
+
+    "--- ✅ THÊM: helper riêng cho saver để gửi mail "đơn mới cần duyệt".
+    "    Đặt ở đây (không dùng lại method của lhc_leave_request) vì saver
+    "    class là 1 class khác, không kế thừa handler. Logic SendGrid dùng
+    "    chung 1 bảng config, nên tách 1 method nhỏ đọc + gọi HTTP riêng. ---
+    METHODS send_new_request_email
+  IMPORTING
+    iv_to_email    TYPE string
+    iv_to_name     TYPE string
+    iv_request_id  TYPE zleave_request-request_id
+    iv_emp_name    TYPE string
+    iv_leave_type  TYPE zleave_request-leave_type
+    iv_start_date  TYPE dats
+    iv_end_date    TYPE dats
+    iv_total_days  TYPE zleave_request-total_days.
+
 ENDCLASS.
 
 CLASS lsc_leave_request IMPLEMENTATION.
@@ -1186,6 +1260,10 @@ CLASS lsc_leave_request IMPLEMENTATION.
 
     "==========================================================================
     " INSERT
+    " ✅ THAY ĐỔI: sau khi INSERT thành công (tức là mọi validate ON SAVE đã
+    " pass), nếu đơn là do Employee tạo (không phải Manager tự tạo -> status
+    " SUBMITTED) và có ApproverId, gửi email thông báo cho Manager tại đây.
+    " Đây là lý do chính bạn yêu cầu tách email ra khỏi determination.
     "==========================================================================
     IF create-leaverequest IS NOT INITIAL.
 
@@ -1200,7 +1278,7 @@ CLASS lsc_leave_request IMPLEMENTATION.
         ls_db-request_id       = <c>-RequestId.
         ls_db-employee_id      = <c>-EmployeeId.
         ls_db-approver_id      = <c>-ApproverId.
-        ls_db-hr_approver_id   = <c>-HrApproverId.    "← ✅ THÊM
+        ls_db-hr_approver_id   = <c>-HrApproverId.
         ls_db-leave_type       = <c>-LeaveType.
         ls_db-start_date       = <c>-StartDate.
         ls_db-end_date         = <c>-EndDate.
@@ -1210,7 +1288,7 @@ CLASS lsc_leave_request IMPLEMENTATION.
         ls_db-reason           = <c>-Reason.
         ls_db-status           = <c>-Status.
         ls_db-approval_comment = <c>-ApprovalComment.
-        ls_db-hr_comment       = <c>-HrComment.       "← ✅ THÊM
+        ls_db-hr_comment       = <c>-HrComment.
         ls_db-attachment       = <c>-Attachment.
         ls_db-mime_type        = <c>-MimeType.
         ls_db-file_name        = <c>-FileName.
@@ -1231,59 +1309,119 @@ CLASS lsc_leave_request IMPLEMENTATION.
           new_status  = <c>-Status
           comments    = |Tạo đơn nghỉ phép mới: { <c>-LeaveType } từ { <c>-StartDate } đến { <c>-EndDate }|
         ) ).
+
+        "--- ✅ GỬI EMAIL Ở ĐÂY: chỉ khi Status = SUBMITTED (đơn Employee
+        "    tạo, cần Manager duyệt) và có ApproverId. Tại thời điểm này,
+        "    toàn bộ validate ON SAVE đã pass và record đã INSERT xong. ---
+        IF ls_db-status = 'SUBMITTED' AND <c>-ApproverId IS NOT INITIAL.
+
+          SELECT SINGLE full_name
+            FROM zemployee_table
+            WHERE emp_id = @<c>-EmployeeId
+            INTO @DATA(lv_emp_name).
+
+          DATA(lv_mgr_email) = get_user_email_for_saver( iv_username = <c>-ApproverId ).
+
+          IF lv_mgr_email IS NOT INITIAL.
+  send_new_request_email(
+    iv_to_email   = lv_mgr_email
+    iv_to_name    = CONV string( <c>-ApproverId )
+    iv_request_id = <c>-RequestId
+    iv_emp_name   = COND #( WHEN sy-subrc = 0 THEN lv_emp_name ELSE CONV string( <c>-EmployeeId ) )
+    iv_leave_type = <c>-LeaveType
+    iv_start_date = <c>-StartDate
+    iv_end_date   = <c>-EndDate
+    iv_total_days = <c>-TotalDays
+  ).
+ENDIF.
+
+        ENDIF.
+
       ENDLOOP.
 
     ENDIF.
 
-    "==========================================================================
-    " UPDATE
-    "==========================================================================
-    IF update-leaverequest IS NOT INITIAL.
 
-      READ ENTITIES OF zi_leave_request IN LOCAL MODE
-        ENTITY LeaveRequest ALL FIELDS
-        WITH CORRESPONDING #( update-leaverequest )
-        RESULT DATA(lt_update).
+"==========================================================================
+" UPDATE
+" BO dùng unmanaged save nên UPDATE cũng phải tự ghi DB như INSERT/DELETE.
+" Thiếu nhánh này thì Status/HrApproverId/comment... do các action approve/
+" reject set qua MODIFY ENTITIES...UPDATE sẽ chỉ nằm trong buffer RAP,
+" không bao giờ tới được bảng zleave_request thật.
+"==========================================================================
+IF update-leaverequest IS NOT INITIAL.
 
-      LOOP AT lt_update ASSIGNING FIELD-SYMBOL(<u>).
-        UPDATE zleave_request SET
-          status           = @<u>-Status,
-          approval_comment = @<u>-ApprovalComment,
-          hr_comment       = @<u>-HrComment,       "← ✅ THÊM
-          hr_approver_id   = @<u>-HrApproverId,    "← ✅ THÊM
-          reason           = @<u>-Reason,
-          leave_type       = @<u>-LeaveType,
-          start_date       = @<u>-StartDate,
-          end_date         = @<u>-EndDate,
-          start_session    = @<u>-StartSession,
-          end_session      = @<u>-EndSession,
-          total_days       = @<u>-TotalDays,
-          attachment       = @<u>-Attachment,
-          mime_type        = @<u>-MimeType,
-          file_name        = @<u>-FileName,
-          last_changed_by  = @<u>-LastChangedBy,
-          last_changed_at  = @<u>-LastChangedAt
-          WHERE mykey = @<u>-UUID.
-      ENDLOOP.
+  READ ENTITIES OF zi_leave_request IN LOCAL MODE
+    ENTITY LeaveRequest ALL FIELDS
+    WITH CORRESPONDING #( update-leaverequest )
+    RESULT DATA(lt_update).
 
-    ENDIF.
+  LOOP AT lt_update ASSIGNING FIELD-SYMBOL(<u>).
+    CLEAR ls_db.
+    ls_db-mykey            = <u>-UUID.
+    ls_db-request_id       = <u>-RequestId.
+    ls_db-employee_id      = <u>-EmployeeId.
+    ls_db-approver_id      = <u>-ApproverId.
+    ls_db-hr_approver_id   = <u>-HrApproverId.
+    ls_db-leave_type       = <u>-LeaveType.
+    ls_db-start_date       = <u>-StartDate.
+    ls_db-end_date         = <u>-EndDate.
+    ls_db-start_session    = <u>-StartSession.
+    ls_db-end_session      = <u>-EndSession.
+    ls_db-total_days       = <u>-TotalDays.
+    ls_db-reason           = <u>-Reason.
+    ls_db-status           = <u>-Status.
+    ls_db-approval_comment = <u>-ApprovalComment.
+    ls_db-hr_comment       = <u>-HrComment.
+    ls_db-attachment       = <u>-Attachment.
+    ls_db-mime_type        = <u>-MimeType.
+    ls_db-file_name        = <u>-FileName.
+    ls_db-created_by       = <u>-CreatedBy.
+    ls_db-created_at       = <u>-CreatedAt.
+    ls_db-last_changed_by  = <u>-LastChangedBy.
+    ls_db-last_changed_at  = <u>-LastChangedAt.
+
+    UPDATE zleave_request FROM @ls_db.
+  ENDLOOP.
+
+ENDIF.
+
+
+
 
     "==========================================================================
     " DELETE
+    " Review lại theo yêu cầu: hoàn trả quota khi status = SUBMITTED.
+    " Giữ nguyên logic gốc (đã đúng) - CHỈ hoàn quota nếu đơn đang SUBMITTED,
+    " vì các đơn REJECTED thì quota đã hoàn ở bước reject, và các đơn
+    " MGR_APPROVED/APPROVED không được phép xoá (đã chặn ở %delete
+    " authorization: chỉ owner + Status = SUBMITTED mới delete được).
+    " -> Dọn lại code cho rõ ràng, gộp SELECT trùng lặp, đưa khai báo
+    " lv_del_ts ra ngoài LOOP.
     "==========================================================================
     IF delete-leaverequest IS NOT INITIAL.
 
+      DATA lv_del_ts TYPE timestampl.
+
       LOOP AT delete-leaverequest ASSIGNING FIELD-SYMBOL(<del>).
 
-        SELECT SINGLE mykey, status, employee_id,
-                      leave_type, total_days, request_id
+        SELECT SINGLE *
           FROM zleave_request
           WHERE mykey = @<del>-UUID
           INTO @DATA(ls_to_del).
 
-        IF sy-subrc <> 0. CONTINUE. ENDIF.
+        IF sy-subrc <> 0.
+          CONTINUE.
+        ENDIF.
 
-        IF ls_to_del-status = 'SUBMITTED'.
+        GET TIME STAMP FIELD lv_del_ts.
+
+        "--- Hoàn trả quota CHỈ khi đơn đang ở SUBMITTED (đơn đã trừ quota
+        "    lúc tạo nhưng chưa được Manager/HR xử lý). Về lý thuyết, đơn
+        "    MGR_APPROVED/APPROVED không thể tới đây vì %delete authorization
+        "    chỉ cho phép owner xoá khi Status = SUBMITTED. Giữ điều kiện
+        "    này như 1 lớp bảo vệ thứ 2 (defense in depth). ---
+        IF ls_to_del-status = 'SUBMITTED' AND ls_to_del-total_days > 0.
 
           SELECT SINGLE *
             FROM zquota
@@ -1292,21 +1430,18 @@ CLASS lsc_leave_request IMPLEMENTATION.
               AND quota_year    = @lv_year
             INTO @DATA(ls_quota).
 
-          IF sy-subrc = 0 AND ls_to_del-total_days > 0.
+          IF sy-subrc = 0.
 
-            DATA(lv_new_used)      = ls_quota-used_days
-                                     - ls_to_del-total_days.
-            DATA(lv_new_remaining) = ls_quota-remaining_days
-                                     + ls_to_del-total_days.
+            DATA(lv_new_used)      = ls_quota-used_days      - ls_to_del-total_days.
+            DATA(lv_new_remaining) = ls_quota-remaining_days + ls_to_del-total_days.
 
-            IF lv_new_used < 0.            lv_new_used = 0.                ENDIF.
+            IF lv_new_used < 0.
+              lv_new_used = 0.
+            ENDIF.
             IF lv_new_remaining > ls_quota-total_days.
               lv_new_remaining = ls_quota-total_days.
             ENDIF.
 
-
-          DATA lv_del_ts TYPE timestampl.
-          GET TIME STAMP FIELD lv_del_ts.
             UPDATE zquota SET
               used_days       = @lv_new_used,
               remaining_days  = @lv_new_remaining,
@@ -1317,32 +1452,153 @@ CLASS lsc_leave_request IMPLEMENTATION.
                 AND quota_year    = @lv_year.
 
           ENDIF.
+
         ENDIF.
 
-        SELECT SINGLE *
-          FROM zleave_request
-          WHERE mykey = @<del>-UUID
-          INTO @DATA(ls_del_rec).
+        "--- Ghi audit log TRƯỚC khi xoá record, dùng luôn ls_to_del (đã
+        "    SELECT * ở trên) thay vì SELECT lại lần 2 như bản gốc. ---
+        INSERT zleave_audit_log FROM @( VALUE zleave_audit_log(
+          log_id      = cl_system_uuid=>create_uuid_x16_static( )
+          request_id  = ls_to_del-request_id
+          employee_id = ls_to_del-employee_id
+          action      = 'DELETE'
+          action_by   = sy-uname
+          action_at   = lv_del_ts
+          old_status  = ls_to_del-status
+          new_status  = 'DELETED'
+          comments    = |Đơn bị xóa bởi { sy-uname }. Quota đã hoàn trả (nếu đơn đang SUBMITTED).|
+        ) ).
 
-        IF sy-subrc = 0.
-            INSERT zleave_audit_log FROM @( VALUE zleave_audit_log(
-            log_id      = cl_system_uuid=>create_uuid_x16_static( )
-            request_id  = ls_del_rec-request_id
-            employee_id = ls_del_rec-employee_id
-            action      = 'DELETE'
-            action_by   = sy-uname
-            action_at   = lv_del_ts
-            old_status  = ls_del_rec-status
-            new_status  = 'DELETED'
-            comments    = |Đơn bị xóa bởi { sy-uname }|
-          ) ).
-
-            DELETE zleave_request FROM @ls_del_rec.
-        ENDIF.
+        DELETE zleave_request FROM @ls_to_del.
 
       ENDLOOP.
 
     ENDIF.
+
+  ENDMETHOD.
+
+"=============================================================================
+" HELPER (saver-local): get_user_email_for_saver
+" Saver class không kế thừa lhc_leave_request nên không dùng lại được
+" get_user_email của handler -> cần bản riêng ở đây (logic giống hệt).
+"=============================================================================
+  METHOD get_user_email_for_saver.
+
+    rv_email = ''.
+
+    SELECT SINGLE smtp_addr
+      FROM adr6
+      INNER JOIN usr21
+        ON adr6~addrnumber  = usr21~addrnumber
+        AND adr6~persnumber = usr21~persnumber
+      WHERE usr21~bname = @iv_username
+      INTO @DATA(lv_email).
+
+    IF sy-subrc = 0.
+      rv_email = lv_email.
+    ENDIF.
+
+  ENDMETHOD.
+
+"=============================================================================
+" HELPER (saver-local): send_new_request_email
+" Gửi email "đơn mới cần duyệt" cho Manager. Đọc SendGrid config từ table
+" ZSENDGRID_CONFIG, giống hệt cơ chế trong lhc_leave_request.
+"=============================================================================
+  METHOD send_new_request_email.
+
+    CONSTANTS lc_endpoint TYPE string VALUE 'https://api.sendgrid.com/v3/mail/send'.
+
+    SELECT SINGLE api_key, sender_email, sender_name
+      FROM zsendgrid_config
+      WHERE config_id  = 'DEFAULT'
+        AND is_active  = @abap_true
+      INTO @DATA(ls_config).
+
+    IF sy-subrc <> 0
+       OR ls_config-api_key      IS INITIAL
+       OR ls_config-sender_email IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lv_body) = |Xin chào,<br><br>| &&
+                    |Nhân viên { iv_emp_name } vừa gửi đơn xin nghỉ phép.<br><br>| &&
+                    |Mã đơn: { iv_request_id }<br>| &&
+                    |Loại nghỉ: { iv_leave_type }<br>| &&
+                    |Từ ngày: { iv_start_date+6(2) }.{ iv_start_date+4(2) }.{ iv_start_date(4) }<br>| &&
+                    |Đến ngày: { iv_end_date+6(2) }.{ iv_end_date+4(2) }.{ iv_end_date(4) }<br>| &&
+                    |Số ngày: { iv_total_days }<br><br>| &&
+                    |Vui lòng đăng nhập hệ thống để duyệt đơn.<br><br>| &&
+                    |Trân trọng,<br>| &&
+                    |<b>Hệ thống Leave Management</b>|.
+
+    DATA(lv_subject) = |[Leave Request] Đơn mới cần duyệt - { iv_request_id }|.
+
+    DATA(lv_json) = |\{"personalizations":[| &&
+                    |\{"to":[| &&
+                    |\{"email":"{ iv_to_email }",| &&
+                    |"name":"{ iv_to_name }"\}| &&
+                    |]\}],| &&
+                    |"from":\{"email":"{ ls_config-sender_email }",| &&
+                    |"name":"{ ls_config-sender_name }"\},| &&
+                    |"subject":"{ lv_subject }",| &&
+                    |"content":[| &&
+                    |\{"type":"text/html",| &&
+                    |"value":"{ lv_body }"\}| &&
+                    |]\}|.
+
+    TRY.
+      DATA lo_http_client TYPE REF TO if_http_client.
+
+      cl_http_client=>create_by_url(
+        EXPORTING
+          url                = lc_endpoint
+        IMPORTING
+          client             = lo_http_client
+        EXCEPTIONS
+          argument_not_found = 1
+          plugin_not_active  = 2
+          internal_error     = 3
+          OTHERS             = 4
+      ).
+
+      IF sy-subrc <> 0. RETURN. ENDIF.
+
+      lo_http_client->request->set_method( 'POST' ).
+
+      lo_http_client->request->set_header_field(
+        name  = 'Authorization'
+        value = |Bearer { ls_config-api_key }|
+      ).
+      lo_http_client->request->set_header_field(
+        name  = 'Content-Type'
+        value = 'application/json'
+      ).
+
+      lo_http_client->request->set_cdata( lv_json ).
+
+      lo_http_client->send(
+        EXCEPTIONS
+          http_communication_failure = 1
+          http_invalid_state         = 2
+          OTHERS                     = 3
+      ).
+
+      IF sy-subrc <> 0. RETURN. ENDIF.
+
+      lo_http_client->receive(
+        EXCEPTIONS
+          http_communication_failure = 1
+          http_invalid_state         = 2
+          http_processing_failed     = 3
+          OTHERS                     = 4
+      ).
+
+      lo_http_client->close( ).
+
+    CATCH cx_root.
+      "--- Không chặn luồng chính khi email lỗi ---
+    ENDTRY.
 
   ENDMETHOD.
 

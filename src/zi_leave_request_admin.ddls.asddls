@@ -23,6 +23,7 @@ define view entity ZI_LEAVE_REQUEST_ADMIN
         else 0
       end                   as StatusCriticality,
       LR.approval_comment   as ApprovalComment,
+      LR.hr_comment         as HrApprovalComment,
       @Semantics.largeObject: {
       mimeType:   'MimeType',
       fileName:   'FileName',

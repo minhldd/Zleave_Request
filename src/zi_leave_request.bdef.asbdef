@@ -18,20 +18,21 @@ define behavior for ZI_LEAVE_REQUEST alias LeaveRequest
     HrApproverId,
     CreatedBy, CreatedAt, LastChangedBy, LastChangedAt;
 
+  field ( readonly ) ApprovalComment, HrComment;
+
   determination determineEmployeeAndManager on modify { create; }
 
-  validation validateDates      on save { create; update; field StartDate, EndDate; }
-  validation validateLeaveQuota on save { create; field TotalDays, LeaveType; }
-  validation validateOverlap    on save { create; field StartDate, EndDate; }
-  validation validateSession    on save { create; field StartSession, EndSession; }
+  validation validateDates          on save { create; field StartDate, EndDate; }
+  validation validateLeaveQuota     on save { create; field LeaveType, StartDate, EndDate, StartSession, EndSession; }
+  validation validateOverlap        on save { create; field StartDate, EndDate; }
+  validation validateSession        on save { create; field StartSession, EndSession; }
+  validation validateLeaveTypeActive on save { create; field LeaveType; }
 
+  action ( features : instance ) approveResult parameter ZI_LEAVE_APPROVE_P  result [1] $self;
+  action ( features : instance ) rejectResult parameter ZI_LEAVE_APPROVE_P   result [1] $self;
 
-  action ( features : instance ) approveResult   result [1] $self;
-  action ( features : instance ) rejectResult    result [1] $self;
-
-
-  action ( features : instance ) hrApproveResult result [1] $self;
-  action ( features : instance ) hrRejectResult  result [1] $self;
+  action ( features : instance ) hrApproveResult parameter ZI_LEAVE_APPROVE_P result [1] $self;
+  action ( features : instance ) hrRejectResult parameter ZI_LEAVE_APPROVE_P result [1] $self;
 
   mapping for zleave_request corresponding
   {

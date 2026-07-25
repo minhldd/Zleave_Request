@@ -11,8 +11,8 @@ define behavior for ZI_EMPLOYEE_ADMIN alias Employee
   create;
   update;
 
-  action deactivate result [1] $self;
-  action activate   result [1] $self;
+  action deactivateEmployee result [1] $self;
+  action activateEmployee   result [1] $self;
 
   field ( mandatory : create ) SapUser, FullName;
   field ( readonly ) EmployeeId, CreatedBy, CreatedAt;

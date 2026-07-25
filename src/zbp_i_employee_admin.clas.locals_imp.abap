@@ -23,11 +23,11 @@ CLASS lhc_employee DEFINITION INHERITING FROM cl_abap_behavior_handler.
     METHODS initializeQuota FOR DETERMINE ON SAVE
       IMPORTING keys FOR employee~initializeQuota.
 
-    METHODS deactivate FOR MODIFY
-      IMPORTING keys FOR ACTION Employee~deactivate RESULT result.
+    METHODS deactivateEmployee FOR MODIFY
+      IMPORTING keys FOR ACTION Employee~deactivateEmployee RESULT result.
 
-    METHODS activate FOR MODIFY
-      IMPORTING keys FOR ACTION Employee~activate RESULT result.
+    METHODS activateEmployee FOR MODIFY
+      IMPORTING keys FOR ACTION Employee~activateEmployee RESULT result.
 ENDCLASS.
 
 CLASS lhc_employee IMPLEMENTATION.
@@ -65,12 +65,12 @@ CLASS lhc_employee IMPLEMENTATION.
           ELSE if_abap_behv=>auth-unauthorized )
 
         "--- Deactivate / Activate: chỉ Admin (thay cho delete cũ) ---
-        %action-deactivate = COND #(
+        %action-deactivateEmployee = COND #(
           WHEN ls_role-is_admin = abap_true
           THEN if_abap_behv=>auth-allowed
           ELSE if_abap_behv=>auth-unauthorized )
 
-        %action-activate = COND #(
+        %action-activateEmployee = COND #(
           WHEN ls_role-is_admin = abap_true
           THEN if_abap_behv=>auth-allowed
           ELSE if_abap_behv=>auth-unauthorized )
@@ -178,7 +178,7 @@ CLASS lhc_employee IMPLEMENTATION.
 
   ENDMETHOD.
 
-  METHOD deactivate.
+  METHOD deactivateEmployee.
 
     MODIFY ENTITIES OF zi_employee_admin IN LOCAL MODE
       ENTITY Employee
@@ -202,7 +202,7 @@ CLASS lhc_employee IMPLEMENTATION.
 
   ENDMETHOD.
 
-  METHOD activate.
+  METHOD activateEmployee.
 
     MODIFY ENTITIES OF zi_employee_admin IN LOCAL MODE
       ENTITY Employee

@@ -25,8 +25,8 @@ define root view entity ZC_EMPLOYEE_ADMIN
   ]
   @UI.lineItem: [
     { position: 10, label: 'Employee ID' },
-    { type: #FOR_ACTION, dataAction: 'deactivate', label: 'Deactivate', position: 200 },
-    { type: #FOR_ACTION, dataAction: 'activate',   label: 'Activate',   position: 210 }
+    { type: #FOR_ACTION, dataAction: 'deactivateEmployee', label: 'Deactivate', position: 200 },
+    { type: #FOR_ACTION, dataAction: 'activateEmployee',   label: 'Activate',   position: 210 }
   ]
   @UI.identification: [{ position: 10, label: 'Employee ID' }]
   key EmployeeId,

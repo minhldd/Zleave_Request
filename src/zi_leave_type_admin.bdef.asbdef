@@ -4,20 +4,25 @@ strict ( 2 );
 define behavior for ZI_LEAVE_TYPE_ADMIN alias LeaveType
   persistent table zleave_type
   lock master
-  authorization master ( global )
+  authorization master ( instance )
 {
   create;
   update;
-  delete;
 
   field ( mandatory : create ) LeaveTypeId, LeaveTypeName;
-  field ( readonly  : update ) LeaveTypeId;
+  field ( readonly  : update ) LeaveTypeId, IsActive;
+
+  determination initializeQuotaForAll on save { create; }
+
+  action deactivateLeaveType result [1] $self;
+  action activateLeaveType   result [1] $self;
 
   mapping for zleave_type
   {
     LeaveTypeId      = leave_type_id;
     LeaveTypeName    = leave_type_name;
     MaxDaysPerYear   = max_day;
+    IsPaid           = is_paid;
     RequiresApproval = requires_approval;
     IsActive         = is_active;
   }
