@@ -19,7 +19,6 @@ define view entity ZI_EMPLOYEE
   @Search.defaultSearchElement: true
       Emp.full_name      as FullName,
 
-      Emp.email          as Email,
       Emp.department     as Department,
       Emp.position_title as PositionTitle,
       Emp.manager_user   as ManagerSapUser,

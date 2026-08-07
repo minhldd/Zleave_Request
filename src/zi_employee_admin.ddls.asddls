@@ -7,7 +7,6 @@ define root view entity ZI_EMPLOYEE_ADMIN
   key E.emp_id          as EmployeeId,
       E.sap_user        as SapUser,
       E.full_name       as FullName,
-      E.email           as Email,
       E.department      as Department,
       E.position_title  as PositionTitle,
       E.manager_user    as ManagerUser,

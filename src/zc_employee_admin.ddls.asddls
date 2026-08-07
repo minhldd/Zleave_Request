@@ -47,8 +47,6 @@ define root view entity ZC_EMPLOYEE_ADMIN
   @UI.identification: [{ position: 50, label: 'Position Title' }]
   PositionTitle,
 
-  @UI.identification: [{ position: 60, label: 'Email' }]
-  Email,
 
   @UI.identification: [{ position: 70, label: 'Manager (SAP User)' }]
   ManagerUser,

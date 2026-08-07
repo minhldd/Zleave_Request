@@ -21,14 +21,12 @@ define behavior for ZI_EMPLOYEE_ADMIN alias Employee
   determination setAuditFields on save { create; }
   determination initializeQuota on save { create; }
 
-  validation checkSapUserUnique on save { create; }
 
   mapping for zemployee_table
 {
   EmployeeId    = emp_id;
   SapUser       = sap_user;
   FullName      = full_name;
-  Email         = email;
   Department    = department;
   PositionTitle = position_title;
   ManagerUser   = manager_user;
